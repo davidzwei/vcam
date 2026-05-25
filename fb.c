@@ -430,6 +430,8 @@ int vcamfb_init(struct vcam_device *dev)
 
 fb_alloc_failure:
     fb_dealloc_cmap(&info->cmap);
+    vfree(fb_data->addr);
+    vfree(fb_data);
     framebuffer_release(info);
     return -EINVAL;
 }
