@@ -37,7 +37,7 @@ const char *help =
     "and apply with crop ratio.\n"
     "\n"
     " -p --pixfmt  pix_fmt                 Specify pixel format (rgb24,yuyv).\n"
-    " -t --memtype mem_type                Specify memory type (mmap,dmabuf).\n"
+    " -t --memtype mem_type                Specify memory type (mmap,userptr,dmabuf).\n"
     " -d --device  /dev/*                  Control device node.\n";
 
 enum ACTION { ACTION_NONE, ACTION_CREATE, ACTION_DESTROY, ACTION_MODIFY };
@@ -108,6 +108,8 @@ int determine_memtype(char *memtype_str)
 {
     if (!strncmp(memtype_str, "mmap", 4))
         return VCAM_MEMORY_MMAP;
+    if (!strncmp(memtype_str, "userptr", 7))
+        return VCAM_MEMORY_USERPTR;
     if (!strncmp(memtype_str, "dmabuf", 6))
         return VCAM_MEMORY_DMABUF;
     return -1;
@@ -215,7 +217,8 @@ int list_devices()
                dev.width, dev.height, dev.cropratio.numerator,
                dev.cropratio.denominator,
                dev.pix_fmt == VCAM_PIXFMT_RGB24 ? "rgb24" : "yuyv",
-               dev.mem_type == VCAM_MEMORY_MMAP ? "mmap" : "dmabuf",
+               dev.mem_type == VCAM_MEMORY_MMAP    ? "mmap"    :
+               dev.mem_type == VCAM_MEMORY_USERPTR ? "userptr" : "dmabuf",
                dev.video_node);
     }
     close(fd);

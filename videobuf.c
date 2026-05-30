@@ -157,6 +157,7 @@ int vcam_out_videobuf2_setup(struct vcam_device *dev)
     pr_info("memory type %d\n", dev->mem_type);
     switch (dev->mem_type) {
     case VCAM_MEMORY_MMAP:
+    case VCAM_MEMORY_USERPTR:
         q->mem_ops = &vb2_vmalloc_memops;
         break;
     case VCAM_MEMORY_DMABUF:
