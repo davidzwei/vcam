@@ -36,7 +36,7 @@ const char *help =
     "                 WxHxCR: 640x480x5/6  Specify the virtual resolution "
     "and apply with crop ratio.\n"
     "\n"
-    " -p --pixfmt  pix_fmt                 Specify pixel format (rgb24,yuyv).\n"
+    " -p --pixfmt  pix_fmt                 Specify pixel format (rgb24,yuyv,nv12).\n"
     " -t --memtype mem_type                Specify memory type (mmap,dmabuf).\n"
     " -d --device  /dev/*                  Control device node.\n";
 
@@ -101,6 +101,8 @@ int determine_pixfmt(char *pixfmt_str)
         return VCAM_PIXFMT_RGB24;
     if (!strncmp(pixfmt_str, "yuyv", 4))
         return VCAM_PIXFMT_YUYV;
+    if (!strncmp(pixfmt_str, "nv12", 4))
+        return VCAM_PIXFMT_NV12;
     return -1;
 }
 
@@ -214,7 +216,8 @@ int list_devices()
         printf("%d. %s(%d,%d,%d/%d,%s,%s) -> %s\n", dev.idx, dev.fb_node,
                dev.width, dev.height, dev.cropratio.numerator,
                dev.cropratio.denominator,
-               dev.pix_fmt == VCAM_PIXFMT_RGB24 ? "rgb24" : "yuyv",
+               dev.pix_fmt == VCAM_PIXFMT_RGB24 ? "rgb24" :
+               dev.pix_fmt == VCAM_PIXFMT_YUYV  ? "yuyv"  : "nv12",
                dev.mem_type == VCAM_MEMORY_MMAP ? "mmap" : "dmabuf",
                dev.video_node);
     }

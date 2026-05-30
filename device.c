@@ -31,6 +31,11 @@ static const struct vcam_device_format vcam_supported_fmts[] = {
         .fourcc = V4L2_PIX_FMT_YUYV,
         .bit_depth = 16,
     },
+    {
+        .name = "YUV 4:2:0 (NV12)",
+        .fourcc = V4L2_PIX_FMT_NV12,
+        .bit_depth = 12,
+    },
 };
 
 static const struct v4l2_file_operations vcam_fops = {
@@ -170,11 +175,16 @@ static int vcam_try_fmt_vid_cap(struct file *file,
     if (f->fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV) {
         f->fmt.pix.bytesperline = f->fmt.pix.width << 1;
         f->fmt.pix.colorspace = V4L2_COLORSPACE_SMPTE170M;
+        f->fmt.pix.sizeimage = f->fmt.pix.bytesperline * f->fmt.pix.height;
+    } else if (f->fmt.pix.pixelformat == V4L2_PIX_FMT_NV12) {
+        f->fmt.pix.bytesperline = f->fmt.pix.width;
+        f->fmt.pix.colorspace = V4L2_COLORSPACE_SMPTE170M;
+        f->fmt.pix.sizeimage = f->fmt.pix.width * f->fmt.pix.height * 3 / 2;
     } else {
         f->fmt.pix.bytesperline = f->fmt.pix.width * 3;
         f->fmt.pix.colorspace = V4L2_COLORSPACE_SRGB;
+        f->fmt.pix.sizeimage = f->fmt.pix.bytesperline * f->fmt.pix.height;
     }
-    f->fmt.pix.sizeimage = f->fmt.pix.bytesperline * f->fmt.pix.height;
 
     return 0;
 }
@@ -458,6 +468,18 @@ static void submit_noinput_buffer(struct vcam_out_buffer *buf,
             *yuyv_ptr = yuyv_tmp;
             yuyv_ptr++;
         }
+    } else if (dev->output_format.pixelformat == V4L2_PIX_FMT_NV12) {
+        unsigned char *y_plane = vbuf_ptr;
+        unsigned char *uv_plane = (unsigned char *) vbuf_ptr + rows * rowsize;
+
+        for (i = 0; i < 255; i++) {
+            memset(y_plane, i, rowsize * stripe_size);
+            y_plane += rowsize * stripe_size;
+        }
+        if (rows % 255)
+            memset(y_plane, 0xff, rowsize * (rows % 255));
+
+        memset(uv_plane, 128, rows * rowsize / 2);
     } else {
         for (i = 0; i < 255; i++) {
             memset(vbuf_ptr, i, rowsize * stripe_size);
@@ -509,6 +531,31 @@ static void copy_scale(unsigned char *dst,
                 int tmp2 = ((j * ratio_width) >> 16);
                 yuyv_dst[(i * dst_width) + j] =
                     yuyv_src[(tmp1 * src_width) + tmp2];
+            }
+        }
+    } else if (dev->output_format.pixelformat == V4L2_PIX_FMT_NV12) {
+        unsigned char *y_dst = dst;
+        unsigned char *uv_dst = dst + dst_height * dst_width;
+        unsigned char *y_src = src;
+        unsigned char *uv_src = src + src_height * src_width;
+        uint32_t ratio_width = ((src_width << 16) / dst_width) + 1;
+
+        for (i = 0; i < dst_height; i++) {
+            int tmp1 = ((i * ratio_height) >> 16);
+            for (j = 0; j < dst_width; j++) {
+                int tmp2 = ((j * ratio_width) >> 16);
+                y_dst[i * dst_width + j] = y_src[tmp1 * src_width + tmp2];
+            }
+        }
+
+        for (i = 0; i < dst_height / 2; i++) {
+            int tmp1 = ((i * ratio_height) >> 16);
+            for (j = 0; j < dst_width / 2; j++) {
+                int tmp2 = ((j * ratio_width) >> 16);
+                uv_dst[i * dst_width + j * 2]     =
+                    uv_src[tmp1 * src_width + tmp2 * 2];
+                uv_dst[i * dst_width + j * 2 + 1] =
+                    uv_src[tmp1 * src_width + tmp2 * 2 + 1];
             }
         }
     }
@@ -594,6 +641,87 @@ static void convert_yuyv_buf_to_rgb24(unsigned char *dst,
     }
 }
 
+static inline unsigned char rgb_to_y(unsigned char r, unsigned char g,
+                                     unsigned char b)
+{
+    int y = ((66 * r + 129 * g + 25 * b) >> 8) + 16;
+    return (unsigned char) (y > 235 ? 235 : (y < 16 ? 16 : y));
+}
+
+static inline unsigned char rgb_to_u(unsigned char r, unsigned char g,
+                                     unsigned char b)
+{
+    int u = ((-38 * r - 74 * g + 112 * b) >> 8) + 128;
+    return (unsigned char) (u > 240 ? 240 : (u < 16 ? 16 : u));
+}
+
+static inline unsigned char rgb_to_v(unsigned char r, unsigned char g,
+                                     unsigned char b)
+{
+    int v = ((112 * r - 94 * g - 18 * b) >> 8) + 128;
+    return (unsigned char) (v > 240 ? 240 : (v < 16 ? 16 : v));
+}
+
+static void convert_rgb24_buf_to_nv12(unsigned char *dst, unsigned char *src,
+                                      uint32_t width, uint32_t height)
+{
+    unsigned char *y_plane = dst;
+    unsigned char *uv_plane = dst + width * height;
+    struct rgb_struct *rgb = (struct rgb_struct *) src;
+    uint32_t x, y;
+
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            struct rgb_struct p = rgb[y * width + x];
+            y_plane[y * width + x] = rgb_to_y(p.r, p.g, p.b);
+        }
+    }
+
+    for (y = 0; y < height; y += 2) {
+        for (x = 0; x < width; x += 2) {
+            struct rgb_struct p = rgb[y * width + x];
+            uint32_t uv_idx = (y / 2) * width + x;
+            uv_plane[uv_idx]     = rgb_to_u(p.r, p.g, p.b);
+            uv_plane[uv_idx + 1] = rgb_to_v(p.r, p.g, p.b);
+        }
+    }
+}
+
+static void copy_scale_rgb24_to_nv12(unsigned char *dst, unsigned char *src,
+                                     struct vcam_device *dev)
+{
+    uint32_t dst_height = dev->output_format.height;
+    uint32_t dst_width = dev->output_format.width;
+    uint32_t src_height = dev->input_format.height;
+    uint32_t src_width = dev->input_format.width;
+    uint32_t ratio_height = ((src_height << 16) / dst_height) + 1;
+    uint32_t ratio_width = ((src_width << 16) / dst_width) + 1;
+    unsigned char *y_plane = dst;
+    unsigned char *uv_plane = dst + dst_height * dst_width;
+    struct rgb_struct *rgb_src = (struct rgb_struct *) src;
+    uint32_t i, j;
+
+    for (i = 0; i < dst_height; i++) {
+        int src_y = (i * ratio_height) >> 16;
+        for (j = 0; j < dst_width; j++) {
+            int src_x = (j * ratio_width) >> 16;
+            struct rgb_struct p = rgb_src[src_y * src_width + src_x];
+            y_plane[i * dst_width + j] = rgb_to_y(p.r, p.g, p.b);
+        }
+    }
+
+    for (i = 0; i < dst_height; i += 2) {
+        int src_y = (i * ratio_height) >> 16;
+        for (j = 0; j < dst_width; j += 2) {
+            int src_x = (j * ratio_width) >> 16;
+            struct rgb_struct p = rgb_src[src_y * src_width + src_x];
+            uint32_t uv_idx = (i / 2) * dst_width + j;
+            uv_plane[uv_idx]     = rgb_to_u(p.r, p.g, p.b);
+            uv_plane[uv_idx + 1] = rgb_to_v(p.r, p.g, p.b);
+        }
+    }
+}
+
 static void submit_copy_buffer(struct vcam_out_buffer *out_buf,
                                struct vcam_in_buffer *in_buf,
                                struct vcam_device *dev)
@@ -629,7 +757,12 @@ static void submit_copy_buffer(struct vcam_out_buffer *out_buf,
             dev->output_format.height == dev->input_format.height) {
             int pixel_count =
                 dev->input_format.height * dev->input_format.width;
-            if (dev->input_format.pixelformat == V4L2_PIX_FMT_YUYV) {
+            if (dev->output_format.pixelformat == V4L2_PIX_FMT_NV12) {
+                pr_debug("RGB24->NV12 no scale\n");
+                convert_rgb24_buf_to_nv12(out_vbuf_ptr, in_vbuf_ptr,
+                                          dev->input_format.width,
+                                          dev->input_format.height);
+            } else if (dev->input_format.pixelformat == V4L2_PIX_FMT_YUYV) {
                 pr_debug("YUYV->RGB24 no scale\n");
                 convert_yuyv_buf_to_rgb24(out_vbuf_ptr, in_vbuf_ptr,
                                           pixel_count);
@@ -643,8 +776,11 @@ static void submit_copy_buffer(struct vcam_out_buffer *out_buf,
                 pr_debug("RGB24->YUYV scale\n");
                 copy_scale_rgb24_to_yuyv(out_vbuf_ptr, in_vbuf_ptr, dev);
             } else if (dev->output_format.pixelformat == V4L2_PIX_FMT_RGB24) {
-                pr_debug("RGB24->YUYV scale\n");
+                pr_debug("YUYV->RGB24 scale\n");
                 copy_scale_yuyv_to_rgb24(out_vbuf_ptr, in_vbuf_ptr, dev);
+            } else if (dev->output_format.pixelformat == V4L2_PIX_FMT_NV12) {
+                pr_debug("RGB24->NV12 scale\n");
+                copy_scale_rgb24_to_nv12(out_vbuf_ptr, in_vbuf_ptr, dev);
             }
         }
     }
@@ -740,6 +876,12 @@ static void fill_v4l2pixfmt(struct v4l2_pix_format *fmt,
         fmt->bytesperline = (fmt->width) << 1;
         fmt->colorspace = V4L2_COLORSPACE_SMPTE170M;
         break;
+    case VCAM_PIXFMT_NV12:
+        fmt->pixelformat = V4L2_PIX_FMT_NV12;
+        fmt->bytesperline = fmt->width;
+        fmt->colorspace = V4L2_COLORSPACE_SMPTE170M;
+        fmt->sizeimage = fmt->width * fmt->height * 3 / 2;
+        break;
     default:
         fmt->pixelformat = V4L2_PIX_FMT_RGB24;
         fmt->bytesperline = (fmt->width * 3);
@@ -819,6 +961,8 @@ struct vcam_device *create_vcam_device(size_t idx,
     } else {
         if (dev_spec && dev_spec->pix_fmt == VCAM_PIXFMT_YUYV)
             vcam->out_fmts[0] = vcam_supported_fmts[1];
+        else if (dev_spec && dev_spec->pix_fmt == VCAM_PIXFMT_NV12)
+            vcam->out_fmts[0] = vcam_supported_fmts[2];
         else
             vcam->out_fmts[0] = vcam_supported_fmts[0];
         vcam->nr_fmts = 1;

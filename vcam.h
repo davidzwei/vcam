@@ -9,7 +9,11 @@
 #define VCAM_IOCTL_ENUM_DEVICES 0x444
 #define VCAM_IOCTL_MODIFY_SETTING 0x555
 
-typedef enum { VCAM_PIXFMT_RGB24 = 0x01, VCAM_PIXFMT_YUYV = 0x02 } pixfmt_t;
+typedef enum {
+    VCAM_PIXFMT_RGB24 = 0x01,
+    VCAM_PIXFMT_YUYV  = 0x02,
+    VCAM_PIXFMT_NV12  = 0x03,
+} pixfmt_t;
 typedef enum { VCAM_MEMORY_MMAP = 0, VCAM_MEMORY_DMABUF = 2 } memtype_t;
 
 struct crop_ratio {
