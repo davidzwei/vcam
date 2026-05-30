@@ -319,6 +319,25 @@ static int vcam_enum_framesizes(struct file *file,
     return 0;
 }
 
+static int vcam_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+    struct vcam_device *dev =
+        container_of(ctrl->handler, struct vcam_device, ctrl_handler);
+    switch (ctrl->id) {
+    case V4L2_CID_HFLIP:
+        dev->hflip = ctrl->val;
+        return 0;
+    case V4L2_CID_VFLIP:
+        dev->vflip = ctrl->val;
+        return 0;
+    }
+    return -EINVAL;
+}
+
+static const struct v4l2_ctrl_ops vcam_ctrl_ops = {
+    .s_ctrl = vcam_s_ctrl,
+};
+
 static const struct v4l2_ioctl_ops vcam_ioctl_ops = {
     .vidioc_querycap = vcam_querycap,
     .vidioc_enum_input = vcam_enum_input,
@@ -428,6 +447,102 @@ static inline void yuyv_to_rgb24_one_pix(void *dst,
     rgb[2] = (unsigned char) b;
 }
 
+static void apply_hflip(unsigned char *buf, struct vcam_device *dev)
+{
+    uint32_t w = dev->output_format.width;
+    uint32_t h = dev->output_format.height;
+    uint32_t fmt = dev->output_format.pixelformat;
+    uint32_t i, j;
+
+    if (fmt == V4L2_PIX_FMT_RGB24) {
+        for (i = 0; i < h; i++) {
+            unsigned char *row = buf + i * w * 3;
+            for (j = 0; j < w / 2; j++) {
+                unsigned char tmp[3];
+                memcpy(tmp, row + j * 3, 3);
+                memcpy(row + j * 3, row + (w - 1 - j) * 3, 3);
+                memcpy(row + (w - 1 - j) * 3, tmp, 3);
+            }
+        }
+    } else if (fmt == V4L2_PIX_FMT_YUYV) {
+        /* YUYV: 4 bytes per 2 pixels [Y0 U Y1 V]; swap macropixels + Y */
+        for (i = 0; i < h; i++) {
+            unsigned char *row = buf + i * w * 2;
+            uint32_t npairs = w / 2;
+            for (j = 0; j < npairs / 2; j++) {
+                unsigned char *a = row + j * 4;
+                unsigned char *b = row + (npairs - 1 - j) * 4;
+                unsigned char tmp[4];
+                tmp[0] = b[2]; tmp[1] = b[1]; tmp[2] = b[0]; tmp[3] = b[3];
+                b[0] = a[2];   b[1] = a[1];   b[2] = a[0];   b[3] = a[3];
+                memcpy(a, tmp, 4);
+            }
+            if (npairs % 2) {
+                unsigned char *mid = row + (npairs / 2) * 4;
+                unsigned char tmp = mid[0];
+                mid[0] = mid[2];
+                mid[2] = tmp;
+            }
+        }
+    } else if (fmt == V4L2_PIX_FMT_NV12) {
+        unsigned char *uv = buf + w * h;
+        for (i = 0; i < h; i++) {
+            unsigned char *row = buf + i * w;
+            for (j = 0; j < w / 2; j++) {
+                unsigned char tmp = row[j];
+                row[j] = row[w - 1 - j];
+                row[w - 1 - j] = tmp;
+            }
+        }
+        for (i = 0; i < h / 2; i++) {
+            unsigned char *row = uv + i * w;
+            uint32_t npairs = w / 2;
+            for (j = 0; j < npairs / 2; j++) {
+                unsigned char tu = row[j * 2],     tv = row[j * 2 + 1];
+                row[j * 2]     = row[(npairs - 1 - j) * 2];
+                row[j * 2 + 1] = row[(npairs - 1 - j) * 2 + 1];
+                row[(npairs - 1 - j) * 2]     = tu;
+                row[(npairs - 1 - j) * 2 + 1] = tv;
+            }
+        }
+    }
+}
+
+static void apply_vflip(unsigned char *buf, struct vcam_device *dev)
+{
+    uint32_t w   = dev->output_format.width;
+    uint32_t h   = dev->output_format.height;
+    uint32_t bpl = dev->output_format.bytesperline;
+    uint32_t fmt = dev->output_format.pixelformat;
+    unsigned char *tmp;
+    uint32_t i;
+
+    tmp = kmalloc(bpl, GFP_KERNEL);
+    if (!tmp)
+        return;
+
+    for (i = 0; i < h / 2; i++) {
+        unsigned char *top = buf + i * bpl;
+        unsigned char *bot = buf + (h - 1 - i) * bpl;
+        memcpy(tmp, top, bpl);
+        memcpy(top, bot, bpl);
+        memcpy(bot, tmp, bpl);
+    }
+
+    if (fmt == V4L2_PIX_FMT_NV12) {
+        unsigned char *uv = buf + w * h;
+        for (i = 0; i < h / 4; i++) {
+            unsigned char *top = uv + i * w;
+            unsigned char *bot = uv + (h / 2 - 1 - i) * w;
+            memcpy(tmp, top, w);
+            memcpy(top, bot, w);
+            memcpy(bot, tmp, w);
+        }
+    }
+
+    kfree(tmp);
+}
+
 static void submit_noinput_buffer(struct vcam_out_buffer *buf,
                                   struct vcam_device *dev)
 {
@@ -468,7 +583,12 @@ static void submit_noinput_buffer(struct vcam_out_buffer *buf,
             memset(vbuf_ptr, 0xff, rowsize * (rows % 255));
     }
 
+    if (dev->hflip)
+        apply_hflip(vbuf_ptr, dev);
+    if (dev->vflip)
+        apply_vflip(vbuf_ptr, dev);
     buf->vb.vb2_buf.timestamp = ktime_get_ns();
+    buf->vb.field = V4L2_FIELD_NONE;
     vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
 }
 
@@ -648,7 +768,12 @@ static void submit_copy_buffer(struct vcam_out_buffer *out_buf,
             }
         }
     }
+    if (dev->hflip)
+        apply_hflip(out_vbuf_ptr, dev);
+    if (dev->vflip)
+        apply_vflip(out_vbuf_ptr, dev);
     out_buf->vb.vb2_buf.timestamp = ktime_get_ns();
+    out_buf->vb.field = V4L2_FIELD_NONE;
     vb2_buffer_done(&out_buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
 }
 
@@ -799,6 +924,18 @@ struct vcam_device *create_vcam_device(size_t idx,
     snprintf(vdev->name, sizeof(vdev->name), "%s-%d", vcam_dev_name, (int) idx);
     video_set_drvdata(vdev, vcam);
 
+    v4l2_ctrl_handler_init(&vcam->ctrl_handler, 2);
+    v4l2_ctrl_new_std(&vcam->ctrl_handler, &vcam_ctrl_ops,
+                      V4L2_CID_HFLIP, 0, 1, 1, 0);
+    v4l2_ctrl_new_std(&vcam->ctrl_handler, &vcam_ctrl_ops,
+                      V4L2_CID_VFLIP, 0, 1, 1, 0);
+    if (vcam->ctrl_handler.error) {
+        ret = vcam->ctrl_handler.error;
+        pr_err("ctrl_handler init failure\n");
+        goto ctrl_handler_failure;
+    }
+    vdev->ctrl_handler = &vcam->ctrl_handler;
+
     ret = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
 
     if (ret < 0) {
@@ -864,6 +1001,8 @@ struct vcam_device *create_vcam_device(size_t idx,
 vcamfb_failure:
     vcamfb_destroy(vcam);
 video_regdev_failure:
+    v4l2_ctrl_handler_free(&vcam->ctrl_handler);
+ctrl_handler_failure:
     video_unregister_device(&vcam->vdev);
     video_device_release(&vcam->vdev);
 vb2_out_init_failed:
@@ -921,6 +1060,7 @@ void destroy_vcam_device(struct vcam_device *vcam)
         kthread_stop(vcam->sub_thr_id);
     vcamfb_destroy(vcam);
     mutex_destroy(&vcam->vcam_mutex);
+    v4l2_ctrl_handler_free(&vcam->ctrl_handler);
     video_unregister_device(&vcam->vdev);
     v4l2_device_unregister(&vcam->v4l2_dev);
 

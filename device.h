@@ -3,6 +3,7 @@
 
 #include <linux/version.h>
 #include <media/v4l2-common.h>
+#include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-rect.h>
@@ -96,6 +97,11 @@ struct vcam_device {
     bool conv_pixfmt_on;
     bool conv_res_on;
     bool conv_crop_on;
+
+    /* Image controls */
+    struct v4l2_ctrl_handler ctrl_handler;
+    bool hflip;
+    bool vflip;
 };
 
 struct vcam_device *create_vcam_device(size_t idx,
